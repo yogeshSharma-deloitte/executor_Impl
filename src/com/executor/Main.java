@@ -1,10 +1,11 @@
 package com.executor;
 
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
-import java.util.concurrent.locks.ReentrantLock;
 
 public class Main {
+
     public enum TaskType {
         READ,
         WRITE,
@@ -37,91 +38,94 @@ public class Main {
         }
     }
 
-    public static class TaskExecutorImpl implements TaskExecutor {
-        private final ExecutorService executorService;
-        private final int maxConcurrency;
-        private final BlockingQueue<Runnable> taskQueue;
-        private final ConcurrentHashMap<UUID, ReentrantLock> groupLocks;
+    static class TaskExecutorImpl implements TaskExecutor {
+        BlockingQueue<Callable> taskQueue;
+        Map<UUID, Object> taskGroup;
+        ExecutorService executorService;
+        int maxConcurrency;
 
         public TaskExecutorImpl(int maxConcurrency) {
+            taskQueue = new LinkedBlockingQueue<>();
             this.maxConcurrency = maxConcurrency;
-            this.executorService = Executors.newFixedThreadPool(maxConcurrency);
-            this.taskQueue = new LinkedBlockingQueue<>();
-            this.groupLocks = new ConcurrentHashMap<>();
-            startTaskExecutor();
+            taskGroup = new ConcurrentHashMap<>();
+            executorService = Executors.newFixedThreadPool(maxConcurrency);
+            startTaskExecution();
         }
 
-        private void startTaskExecutor() {
-            executorService.submit(new Runnable() {
-                    @Override
-                    public void run() {
-                        while (true) {
-                            try {
-                                Runnable task = taskQueue.take();
-                                task.run();
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                break;
-                            }
-                        }
+        private void startTaskExecution() {
+            for (int i = 1; i < maxConcurrency; i++) {
+                executorService.submit(() -> {
+                    try {
+                        Callable task = taskQueue.take();
+                        task.call();
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
                     }
                 });
+
             }
+        }
 
 
         @Override
         public <T> Future<T> submitTask(Task<T> task) {
-            CompletableFuture<T> future = new CompletableFuture<>();
-            Runnable wrappedTask = new Runnable() {
-                @Override
-                public void run() {
-                    ReentrantLock lock = groupLocks.computeIfAbsent(task.taskGroup().groupUUID(), k -> new ReentrantLock());
-                    lock.lock();
-                    try {
-                        T result = task.taskAction().call();
-                        future.complete(result);
-                    } catch (Exception e) {
-                        future.completeExceptionally(e);
-                    } finally {
-                        lock.unlock();
-                    }
+            CompletableFuture<T> completableFuture = new CompletableFuture<>();
+            Object computeIfAbsent = taskGroup.computeIfAbsent(task.taskGroup().groupUUID(), k -> new Object());
+            synchronized (computeIfAbsent) {
+                try {
+                    T future = task.taskAction().call();
+                    completableFuture.complete(future);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
                 }
-            };
-            taskQueue.offer(wrappedTask);
-            return future;
+            }
+            return completableFuture;
+
         }
+
+
+
     }
 
     public static void main(String[] args) {
-        TaskExecutor taskExecutor = new TaskExecutorImpl(10);
 
-        TaskGroup group1 = new TaskGroup(UUID.randomUUID());
-        TaskGroup group2 = new TaskGroup(UUID.randomUUID());
+        TaskExecutorImpl taskExecutor = new TaskExecutorImpl(10);
+        TaskGroup taskGroup1 = new TaskGroup(UUID.randomUUID());
+        TaskGroup taskGroup2 = new TaskGroup(UUID.randomUUID());
+        TaskGroup taskGroup3 = new TaskGroup(UUID.randomUUID());
+        Task task1 = new Task(UUID.randomUUID(), taskGroup1, TaskType.READ, () -> {
 
-        Task<Integer> task1 = new Task<>(UUID.randomUUID(), group1, TaskType.READ, new Callable<Integer>() {
-            @Override
-            public Integer call() {
-                System.out.println("Executing Task 1");
-                return 1;
-            }
+            return "Task 1";
         });
 
-        Task<Integer> task2 = new Task<>(UUID.randomUUID(), group2, TaskType.WRITE, new Callable<Integer>() {
-            @Override
-            public Integer call() {
-                System.out.println("Executing Task 2");
-                return 2;
-            }
+        Task task2 = new Task(UUID.randomUUID(), taskGroup2, TaskType.READ, () -> {
+
+            return "Task 2";
+        });
+        Task task3 = new Task(UUID.randomUUID(), taskGroup3, TaskType.WRITE, () -> {
+
+            return "Task 3";
         });
 
-        Future<Integer> future1 = taskExecutor.submitTask(task1);
-        Future<Integer> future2 = taskExecutor.submitTask(task2);
+        Future future1 = taskExecutor.submitTask(task1);
+        Future future2 = taskExecutor.submitTask(task2);
+        Future future3 = taskExecutor.submitTask(task3);
 
         try {
-            System.out.println("Result of Task 1: " + future1.get());
-            System.out.println("Result of Task 2: " + future2.get());
-        } catch (InterruptedException | ExecutionException e) {
-            e.printStackTrace();
+            System.out.println(future1.get());
+            System.out.println(future2.get());
+            System.out.println(future3.get());
+
+        } catch (InterruptedException e) {
+            throw new RuntimeException(e);
+        } catch (ExecutionException e) {
+            throw new RuntimeException(e);
         }
+
+
     }
+
+
 }
